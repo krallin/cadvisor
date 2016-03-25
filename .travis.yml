@@ -1,12 +1,20 @@
 language: go
 sudo: false
 go:
- - 1.5.3
+- 1.5.3
 install:
- - true
+- true
 before_script:
- - go get golang.org/x/tools/cmd/vet
- - go get github.com/kr/godep
+- go get golang.org/x/tools/cmd/vet
+- go get github.com/kr/godep
 script:
- - export PATH=$PATH:$HOME/gopath/bin
- - ./build/presubmit.sh
+- export PATH=$PATH:$HOME/gopath/bin
+- "./build/presubmit.sh"
+deploy:
+  provider: releases
+  api_key:
+    secure: m5smzafmUIWl5HgrVlgKbHxFi9KQcVDGFNakt3zR5CWy9AJ7cv677tG9dxEQL9+0gFfNnRn0q8l2BJwEYN/UQluJNHqNkBd8syor6R7JWbOo7aAC/l3i+1DFn21uPfOplPpH8cmB9082+tpxzov+PazV+cv2aulZZoOK3ETcxKcJhG2wvE13SKGYYAEfFDYdlec7cACE7ExOqRmmUtnhHlo4UYVie3H8lGXT3wNgE2eUfs+ZCLHnGn+irDTbuo4bPYx1T3fWfpaOz8vp08yBF/vQDMtbxcctedyu8zD3aAxg1vkuz4gLlEVrObUkNHeZ98YTG0sdZN6bD+vBkOwXGslSzaQfcSwzhs9Wa62JUFxdOquO7oCo6T3epbVVm5OjYQH8QpP3vGpkQPeBgivZL2PZVi7WlAJa/r8b9BNK8OzWTy1mH5vnlT1iSXNBAUvP/XZdeVmR6jKQv88eTxHYengaZ/LXlH9ZTmRE2IZPkHBkFmh31/sZdGUqTuD+q8FDNEa1Yn6HAb1ittL/Ke2jFL0F75KEqk6rS8BITkwCItnR+MHJfHekQN8KQMNwZJsape4LsIh2Lk1NVBGBSU+mO34zlvud+fc+sMd2P1Hm6ad++oBf9kIAamnFaUuoCXrn3S35SYzQJPprMVVvBUrJmmgokjqxQEjfu+BrqtPH2vI=
+  file: ./cadvisor
+  on:
+    repo: krallin/cadvisor
+    tags: true
