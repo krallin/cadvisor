@@ -131,7 +131,7 @@ func New(memoryCache *memory.InMemoryCache, sysfs sysfs.SysFs, maxHousekeepingIn
 
 	dockerInfo, err := docker.DockerInfo()
 	if err != nil {
-		glog.Warningf("Unable to connect to Docker: %v", err)
+		glog.Fatalf("Unable to connect to Docker: %v", err)
 	}
 	context := fs.Context{DockerRoot: docker.RootDir(), DockerInfo: dockerInfo}
 	fsInfo, err := fs.NewFsInfo(context)
@@ -206,7 +206,7 @@ func (self *manager) Start() error {
 	// Register Docker container factory.
 	err := docker.Register(self, self.fsInfo, self.ignoreMetrics)
 	if err != nil {
-		glog.Errorf("Docker container factory registration failed: %v.", err)
+		glog.Fatalf("Docker container factory registration failed: %v.", err)
 	}
 
 	// Register the raw driver.
