@@ -30,6 +30,7 @@ import (
 	"github.com/google/cadvisor/utils"
 
 	docker "github.com/fsouza/go-dockerclient"
+	"github.com/golang/glog"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	cgroupfs "github.com/opencontainers/runc/libcontainer/cgroups/fs"
 	libcontainerconfigs "github.com/opencontainers/runc/libcontainer/configs"
@@ -39,7 +40,7 @@ const (
 	// The read write layers exist here.
 	aufsRWLayer = "diff"
 	// Path to the directory where docker stores log files if the json logging driver is enabled.
-	pathToContainersDir = "containers"
+	pathToContainersLogDir = "containers"
 )
 
 type dockerContainerHandler struct {
@@ -56,9 +57,8 @@ type dockerContainerHandler struct {
 	// Manager of this container's cgroups.
 	cgroupManager cgroups.Manager
 
-	storageDriver    storageDriver
-	fsInfo           fs.FsInfo
-	rootfsStorageDir string
+	storageDriver storageDriver
+	fsInfo        fs.FsInfo
 
 	// Time at which this container was created.
 	creationTime time.Time
@@ -66,6 +66,10 @@ type dockerContainerHandler struct {
 	// Metadata associated with the container.
 	labels map[string]string
 	envs   map[string]string
+
+	// The directories in use by this container
+	baseDirs  []string
+	extraDirs []string
 
 	// The container PID used to switch namespaces as required
 	pid int
@@ -137,20 +141,9 @@ func newDockerContainerHandler(
 
 	id := ContainerNameToDockerId(name)
 
-	// Add the Containers dir where the log files are stored.
-	// FIXME: Give `otherStorageDir` a more descriptive name.
-	otherStorageDir := path.Join(storageDir, pathToContainersDir, id)
-
 	rwLayerID, err := getRwLayerID(id, storageDir, storageDriver, dockerVersion)
 	if err != nil {
 		return nil, err
-	}
-	var rootfsStorageDir string
-	switch storageDriver {
-	case aufsStorageDriver:
-		rootfsStorageDir = path.Join(storageDir, string(aufsStorageDriver), aufsRWLayer, rwLayerID)
-	case overlayStorageDriver:
-		rootfsStorageDir = path.Join(storageDir, string(overlayStorageDriver), rwLayerID)
 	}
 
 	handler := &dockerContainerHandler{
@@ -163,13 +156,8 @@ func newDockerContainerHandler(
 		storageDriver:      storageDriver,
 		fsInfo:             fsInfo,
 		rootFs:             rootFs,
-		rootfsStorageDir:   rootfsStorageDir,
 		envs:               make(map[string]string),
 		ignoreMetrics:      ignoreMetrics,
-	}
-
-	if !ignoreMetrics.Has(container.DiskUsageMetrics) {
-		handler.fsHandler = newFsHandler(time.Minute, rootfsStorageDir, otherStorageDir, fsInfo)
 	}
 
 	// We assume that if Inspect fails then the container is not known to docker.
@@ -194,6 +182,47 @@ func newDockerContainerHandler(
 				handler.envs[strings.ToLower(exposedEnv)] = splits[1]
 			}
 		}
+	}
+
+	handler.baseDirs = make([]string, 0)
+	handler.extraDirs = make([]string, 0)
+
+	// Docker API >= 1.20 exposes a "Mounts" list of structures representing mounts
+	// (https://docs.docker.com/engine/reference/api/docker_remote_api_v1.20/)
+	for _, mount := range ctnr.Mounts {
+		handler.baseDirs = append(handler.baseDirs, path.Join(rootFs, mount.Source))
+	}
+
+	// Docker API < 1.20 exposes a "Volumes" mapping of container paths to host paths.
+	// (https://docs.docker.com/engine/reference/api/docker_remote_api_v1.19/)
+	for _, hostPath := range ctnr.Volumes {
+		handler.baseDirs = append(handler.baseDirs, path.Join(rootFs, hostPath))
+	}
+
+	// Now, handle the rootfs
+	rootfsStorageDir := ""
+	switch storageDriver {
+	case aufsStorageDriver:
+		rootfsStorageDir = path.Join(storageDir, string(aufsStorageDriver), aufsRWLayer, rwLayerID)
+	case overlayStorageDriver:
+		rootfsStorageDir = path.Join(storageDir, string(overlayStorageDriver), rwLayerID)
+	}
+
+	// We support (and found) the mount
+	if rootfsStorageDir != "" {
+		handler.baseDirs = append(handler.baseDirs, rootfsStorageDir)
+	} else {
+		glog.Warningf("Unable to find root mount for container %q (storageDriver: %q)", name, storageDriver)
+	}
+
+	// Now, handle the storage dir
+	logsStorageDir := path.Join(storageDir, pathToContainersLogDir, id)
+	handler.extraDirs = append(handler.extraDirs, logsStorageDir)
+
+	// And start DiskUsageMetrics (if enabled)
+	if !ignoreMetrics.Has(container.DiskUsageMetrics) {
+		// We need to find all our base dirs!
+		handler.fsHandler = newFsHandler(time.Minute, handler.baseDirs, handler.extraDirs, fsInfo)
 	}
 
 	return handler, nil
@@ -287,10 +316,7 @@ func (self *dockerContainerHandler) GetSpec() (info.ContainerSpec, error) {
 	spec.CreationTime = self.creationTime
 
 	if !self.ignoreMetrics.Has(container.DiskUsageMetrics) {
-		switch self.storageDriver {
-		case aufsStorageDriver, overlayStorageDriver, zfsStorageDriver:
-			spec.HasFilesystem = true
-		}
+		spec.HasFilesystem = true
 	}
 
 	spec.Labels = self.labels
@@ -302,42 +328,18 @@ func (self *dockerContainerHandler) GetSpec() (info.ContainerSpec, error) {
 }
 
 func (self *dockerContainerHandler) getFsStats(stats *info.ContainerStats) error {
-	if self.ignoreMetrics.Has(container.DiskUsageMetrics) {
+	if self.fsHandler == nil {
 		return nil
 	}
-	switch self.storageDriver {
-	case aufsStorageDriver, overlayStorageDriver, zfsStorageDriver:
-	default:
-		return nil
-	}
+	fsStats, err := self.fsHandler.usage()
 
-	deviceInfo, err := self.fsInfo.GetDirFsDevice(self.rootfsStorageDir)
 	if err != nil {
 		return err
 	}
 
-	mi, err := self.machineInfoFactory.GetMachineInfo()
-	if err != nil {
-		return err
+	for _, stat := range fsStats {
+		stats.Filesystem = append(stats.Filesystem, *stat)
 	}
-	var (
-		limit  uint64
-		fsType string
-	)
-
-	// Docker does not impose any filesystem limits for containers. So use capacity as limit.
-	for _, fs := range mi.Filesystems {
-		if fs.Device == deviceInfo.Device {
-			limit = fs.Capacity
-			fsType = fs.Type
-			break
-		}
-	}
-
-	fsStat := info.FsStats{Device: deviceInfo.Device, Type: fsType, Limit: limit}
-
-	fsStat.BaseUsage, fsStat.Usage = self.fsHandler.usage()
-	stats.Filesystem = append(stats.Filesystem, fsStat)
 
 	return nil
 }
