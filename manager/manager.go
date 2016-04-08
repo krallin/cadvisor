@@ -148,7 +148,7 @@ func New(memoryCache *memory.InMemoryCache, sysfs sysfs.SysFs, maxHousekeepingIn
 
 	newManager := &manager{
 		containers:               make(map[namespacedContainerName]*containerData),
-		quitChannels:             make([]chan error, 0, 2),
+		quitChannels:             make([]chan error, 0, 3),
 		memoryCache:              memoryCache,
 		fsInfo:                   fsInfo,
 		cadvisorContainer:        selfContainer,
@@ -254,6 +254,11 @@ func (self *manager) Start() error {
 	self.quitChannels = append(self.quitChannels, quitGlobalHousekeeping)
 	go self.globalHousekeeping(quitGlobalHousekeeping)
 
+	// Update FS info to prevent it from going stale
+	quitFsInfoCacheManager := make(chan error)
+	self.quitChannels = append(self.quitChannels, quitFsInfoCacheManager)
+	go self.fsInfoCacheRefreshLoop(quitFsInfoCacheManager)
+
 	return nil
 }
 
@@ -269,8 +274,23 @@ func (self *manager) Stop() error {
 			return err
 		}
 	}
-	self.quitChannels = make([]chan error, 0, 2)
+	self.quitChannels = make([]chan error, 0, 3)
 	return nil
+}
+
+func (self *manager) fsInfoCacheRefreshLoop(quit chan error) {
+	ticker := time.Tick(1 * time.Minute)
+
+	for {
+		select {
+		case <-ticker:
+			self.fsInfo.RefreshCache()
+		case <-quit:
+			quit <- nil
+			glog.Infof("Exiting fsInfoCacheRefreshLoop")
+			return
+		}
+	}
 }
 
 func (self *manager) globalHousekeeping(quit chan error) {
