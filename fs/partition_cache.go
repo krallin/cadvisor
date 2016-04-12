@@ -95,7 +95,7 @@ func (self *RealPartitionCache) Refresh() error {
 			continue
 		}
 		if mount.Fstype == "zfs" {
-			Fstype = mount.Fstype // REVIEW: Is this correct?
+			Fstype = mount.Fstype // REVIEW: Is this correct? We don't set Fstype for non-ZFS.
 		}
 		partitions[mount.Source] = partition{
 			fsType:     Fstype,
